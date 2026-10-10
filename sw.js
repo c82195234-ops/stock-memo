@@ -1,5 +1,5 @@
 // アプリを更新したら VERSION を変えると、新しいファイルに入れ替わります
-const VERSION = 'stock-v8';
+const VERSION = 'stock-v9';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-maskable-512.png'];
 const FONT_HOSTS = ['fonts.googleapis.com', 'fonts.gstatic.com'];
 

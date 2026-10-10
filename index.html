@@ -116,6 +116,15 @@ textarea{min-height:76px;resize:vertical}
 .savebar .primary{margin-top:0}
 .savebar .dirty{text-align:center;color:var(--red);font-size:12px;font-weight:700;margin-bottom:6px}
 .sheet.still{animation:none}
+.chk{width:26px;height:26px;border-radius:9px;border:2.4px solid var(--ink);flex:none;display:grid;place-items:center;background:var(--card)}
+.chk.on{background:var(--red);border-color:var(--red)}
+.chk.on::after{content:'';width:6px;height:12px;border:solid #fff;border-width:0 3px 3px 0;transform:rotate(45deg) translate(-1px,-1px)}
+.selbar{position:absolute;left:12px;right:12px;bottom:calc(88px + env(safe-area-inset-bottom,0px));display:flex;gap:8px;background:var(--card);border:1px solid var(--line);border-radius:24px;padding:8px;box-shadow:0 6px 18px rgba(27,42,92,.18);z-index:5}
+.selbar button{margin:0;min-height:46px;width:auto;padding:0 14px}
+.selbar .primary{flex:1}.selbar .primary:disabled{opacity:.4}
+.chkrow{display:flex;align-items:center;gap:10px;margin-top:12px;font-weight:700}
+.chkrow input{width:24px;height:24px;min-height:0;padding:0;flex:none;accent-color:var(--red)}
+button:disabled{opacity:.45}
 .card.zr{opacity:.8}.card.zr .qty{color:var(--mute)}.fold .fc b{color:var(--red)}
 </style>
 </head>
@@ -181,18 +190,65 @@ const dirty=()=>sheet?.k==='detail'&&JSON.stringify(sheet.draft)!==sheet.orig;
 const updDirty=()=>{const m=$('#dirtyMsg');if(m)m.hidden=!dirty()};
 const byDate=(a,b)=>sortedRows(a)[0].d<sortedRows(b)[0].d?-1:1;
 const tagsHTML=i=>`<div class="tags"><span class="tag navy">${esc(i.f)}</span>${i.loc?`<span class="tag pl">${esc(i.loc)}</span>`:''}</div>`;
+let selMode=false,lastCtx='',vis=[];const sel=new Set();
+const chk=i=>selMode?`<span class="chk${sel.has(i.id)?' on':''}" aria-hidden="true"></span>`:'';
+const shortD=d=>{const p=d.split('-');return (+p[1])+'/'+(+p[2])};
+function itemLine(i){const u=i.u;let t='・'+i.name+' '+total(i)+u;
+ if(!inStock(i))t+='（在庫なし）';
+ else{const rs=sortedRows(i),multi=rs.length>1,lst=rs.map(r=>shortD(r.d)+' '+r.q+u).join('、');
+  t+=i.t==='exp'?'（期限 '+(multi?lst:shortD(rs[0].d))+'）':'（購入日 '+(multi?lst:shortD(rs[0].d))+'、購入日から'+(-days(rs[0].d))+'日）'}
+ if(i.loc)t+='／'+i.loc;return t}
+function buildText(ids){const d=new Date();let out='【ストックリスト】'+d.getFullYear()+'/'+(d.getMonth()+1)+'/'+d.getDate();
+ const items=S.items.filter(i=>ids.has(i.id));
+ S.folders.forEach(f=>{const a=items.filter(i=>i.f===f);if(!a.length)return;
+  out+='\n\n■'+f+'\n'+[...a.filter(inStock).sort(byDate),...a.filter(i=>!inStock(i))].map(itemLine).join('\n')});
+ return out}
+async function copyText(t){try{await navigator.clipboard.writeText(t);return true}catch(e){const ta=document.createElement('textarea');ta.value=t;ta.style.cssText='position:fixed;opacity:0';document.body.appendChild(ta);ta.select();let ok=false;try{ok=document.execCommand('copy')}catch(_){}ta.remove();return ok}}
+function updSel(){document.querySelectorAll('.card[data-id]').forEach(c=>{const k=c.querySelector('.chk');if(k)k.classList.toggle('on',sel.has(+c.dataset.id))});
+ const n=$('#selN');if(n)n.textContent=sel.size;const g=$('#selgo');if(g)g.disabled=!sel.size;
+ const al=$('#selall');if(al)al.textContent=(vis.length&&vis.every(id=>sel.has(id)))?'全解除':'全選択'}
+// --- 引き継ぎコード
+const b64e=u8=>{let s='';for(let i=0;i<u8.length;i+=0x8000)s+=String.fromCharCode.apply(null,u8.subarray(i,i+0x8000));return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')};
+const b64d=t=>{t=t.replace(/-/g,'+').replace(/_/g,'/');while(t.length%4)t+='=';const b=atob(t),u=new Uint8Array(b.length);for(let i=0;i<b.length;i++)u[i]=b.charCodeAt(i);return u};
+async function makeCode(withPhoto){const st=it=>withPhoto?it:{...it,photo:null};
+ const o={app:'stock',v:1,folders:S.folders,locs:S.locs,units:S.units,nid:S.nid,items:S.items.map(st),trash:S.trash.map(x=>({at:x.at,item:st(x.item)}))};
+ let bytes=new TextEncoder().encode(JSON.stringify(o)),tag='0';
+ if(window.CompressionStream){bytes=new Uint8Array(await new Response(new Blob([bytes]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());tag='1'}
+ return 'STOCK'+tag+':'+b64e(bytes)}
+async function readCode(text){const m=text.replace(/\s+/g,'').match(/STOCK([01]):([A-Za-z0-9_-]+)/);if(!m)throw new Error('no');
+ let u8=b64d(m[2]),json;
+ if(m[1]==='1'){if(!window.DecompressionStream)throw new Error('nodec');json=await new Response(new Blob([u8]).stream().pipeThrough(new DecompressionStream('gzip'))).text()}
+ else json=new TextDecoder().decode(u8);
+ const o=JSON.parse(json);if(o.app!=='stock'||!Array.isArray(o.items)||!Array.isArray(o.folders))throw new Error('bad');
+ const str=(v,d='')=>typeof v==='string'?v:d,okd=d=>/^\d{4}-\d\d-\d\d$/.test(d);
+ const folders=[...new Set(o.folders.map(f=>str(f)).filter(Boolean))];if(!folders.length)folders.push('その他');
+ const locs=[...new Set((Array.isArray(o.locs)?o.locs:[]).map(f=>str(f)).filter(Boolean))];
+ const units=[...new Set((Array.isArray(o.units)?o.units:[]).map(f=>str(f)).filter(Boolean))];if(!units.length)units.push('個');
+ let maxId=0;const used=new Set();
+ const clean=it=>{if(!it||typeof it.name!=='string'||!Array.isArray(it.rows))return null;let id=+it.id;if(!Number.isFinite(id)||used.has(id))id=0;
+  const f=folders.includes(it.f)?it.f:folders[0];
+  return{id,t:it.t==='cnt'?'cnt':'exp',name:it.name,f,loc:locs.includes(it.loc)?it.loc:'',u:str(it.u,'個'),memo:str(it.memo),photo:(typeof it.photo==='string'&&it.photo.startsWith('data:image/'))?it.photo:null,
+   rows:it.rows.filter(r=>r&&+r.q>0&&okd(r.d)).map(r=>({q:+r.q,d:r.d}))}};
+ const fin=it=>{if(!it)return null;if(it.id)used.add(it.id);maxId=Math.max(maxId,it.id||0);return it};
+ const items=o.items.map(clean).map(fin).filter(Boolean);
+ const trash=(Array.isArray(o.trash)?o.trash:[]).map(x=>x&&Number.isFinite(+x.at)?{at:+x.at,item:fin(clean(x.item))}:null).filter(x=>x&&x.item);
+ let nid=Math.max(+o.nid||1,maxId+1);
+ [...items,...trash.map(x=>x.item)].forEach(it=>{if(!it.id)it.id=nid++});
+ [...items,...trash.map(x=>x.item)].forEach(it=>{units.includes(it.u)||units.push(it.u)});
+ return{folders,locs,units,items,trash,nid}}
 const cardHTML=i=>{const exp=i.t==='exp';const r=sortedRows(i)[0];const dd=days(r.d);
-return `<button class="card" data-act="open" data-id="${i.id}"><span class="info"><div class="name">${esc(i.name)}</div>
+return `<button class="card" data-act="${selMode?'tog':'open'}" data-id="${i.id}">${chk(i)}<span class="info"><div class="name">${esc(i.name)}</div>
 ${exp?`<div class="meta"><span class="tag">賞味期限</span><span class="date">${fmt(r.d)}</span><span class="tag soft ${dd<=3?'warn':''}" style="${dd<=3?'color:#fff':''}">${dd<0?'期限切れ':dd===0?'今日まで':'あと'+dd+'日'}</span></div>`
 :`<div class="meta"><span>いちばん古い購入日：<span class="date">${fmt(r.d)}</span></span><span class="tag soft">購入日から${-dd}日</span></div>`}
 ${tagsHTML(i)}
 ${i.rows.length>1?`<div class="sub">${exp?'いちばん近い期限の分':'いちばん古い購入日の分'}：<b>${r.q}${esc(i.u)}</b>（全${i.rows.length}件）</div>`:''}</span>
 <span class="qty"><em>合計</em>${total(i)}<small>${esc(i.u)}</small></span><span aria-hidden="true">›</span></button>`};
-const zeroCard=i=>`<button class="card zr" data-act="open" data-id="${i.id}"><span class="info"><div class="name">${esc(i.name)}</div>${tagsHTML(i)}<div class="sub"><span class="tag soft">在庫なし</span>　${i.t==='exp'?'賞味期限タイプ':'経過日数タイプ'}・タップして在庫を追加できます</div></span><span class="qty"><em>合計</em>0<small>${esc(i.u)}</small></span><span aria-hidden="true">›</span></button>`;
+const zeroCard=i=>`<button class="card zr" data-act="${selMode?'tog':'open'}" data-id="${i.id}">${chk(i)}<span class="info"><div class="name">${esc(i.name)}</div>${tagsHTML(i)}<div class="sub"><span class="tag soft">在庫なし</span>　${i.t==='exp'?'賞味期限タイプ':'経過日数タイプ'}・タップして在庫を追加できます</div></span><span class="qty"><em>合計</em>0<small>${esc(i.u)}</small></span><span aria-hidden="true">›</span></button>`;
 const trashCard=x=>{const i=x.item;return `<div class="card tr"><span class="info"><div class="name">${esc(i.name)}</div>${tagsHTML(i)}<div class="sub">削除した日：${fmtD(x.at)}　<b>あと${leftDays(x)}日</b>で自動的に完全削除</div>
 <div class="trbtn"><button class="btn-navy" data-act="restore" data-id="${i.id}">元に戻す</button><button class="ghost" data-act="purge" data-id="${i.id}">完全に削除</button></div></span></div>`};
 const folderSel=()=>`<label class="sel2"><span>フォルダ</span><select data-act="folder" aria-label="フォルダで絞り込む"><option value="all">すべて</option>${S.folders.map(f=>`<option ${S.folder===f?'selected':''}>${esc(f)}</option>`).join('')}</select></label>`;
 const locSel=()=>`<label class="sel2"><span>保管場所</span><select data-act="loc" aria-label="保管場所で絞り込む"><option value="all">すべて</option><option value="__none" ${S.loc==='__none'?'selected':''}>未設定</option>${S.locs.map(l=>`<option ${S.loc===l?'selected':''}>${esc(l)}</option>`).join('')}</select></label>`;
+const selRow=()=>selMode?'':`<div style="text-align:right"><button class="link" data-act="selmode">まとめて選んで共有</button></div>`;
 const manageBtn='<button class="btn-navy" data-act="addFolder">管理</button>';
 const crumbs=(cur,back)=>back?`<div class="crumbs"><button data-act="hroot" aria-label="ホームに戻る"><svg ${SVA}><path d="M19.5 6.5 10 16l9.5 9.5"/></svg>ホーム</button><span>›</span><b>${cur}</b></div>`:`<div class="crumbs"><b style="padding-left:12px">${cur}</b></div>`;
 const FSVG=`<svg class="fo" viewBox="0 0 32 32" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${FPATH}"/></svg>`;
@@ -200,7 +256,7 @@ const banner=()=>`<div class="banner" aria-hidden="true">${bloom('var(--red)','l
 
 function homeMain(){
  if(view==='zero'){const l=S.items.filter(i=>!inStock(i)&&fOK(i)&&locOK(i));
-  return banner()+`<h3 class="sec">在庫がないアイテム<span>${l.length}件</span></h3>`+(l.length?l.map(zeroCard).join(''):`<p class="empty">条件に合う「在庫なし」のアイテムはありません。</p>`)}
+  return banner()+selRow()+`<h3 class="sec">在庫がないアイテム<span>${l.length}件</span></h3>`+(l.length?l.map(zeroCard).join(''):`<p class="empty">条件に合う「在庫なし」のアイテムはありません。</p>`)}
  if(view==='trash'){const l=[...S.trash].sort((a,b)=>b.at-a.at);
   return banner()+`<h3 class="sec">ゴミ箱<span>${l.length}件</span></h3><p class="hint">削除したアイテムは${KEEP}日間ここに残り、その後自動的に完全削除されます。</p>`
    +(l.length?`<button class="ghost" data-act="emptyTrash" style="margin:0 0 12px">ゴミ箱を空にする</button>`+l.map(trashCard).join(''):`<p class="empty">ゴミ箱は空です。</p>`)}
@@ -217,10 +273,11 @@ function homeMain(){
  const part=t=>{const a=items.filter(i=>i.t===t);return{l:a.filter(inStock).sort(byDate),z:a.filter(i=>!inStock(i))}};
  const e=part('exp'),c=part('cnt');
  const sec=(t,o)=>`<h3 class="sec">${t}<span>${o.l.length}件${o.z.length?`・在庫0 ${o.z.length}件`:''}</span></h3>`+o.l.map(cardHTML).join('')+o.z.map(zeroCard).join('');
- return banner()+sec('賞味期限タイプ',e)+sec('経過日数タイプ',c)+(items.length?'':`<p class="empty">条件に合うアイテムがありません。<br>右下の「追加」から登録しましょう。</p>`);
+ return banner()+selRow()+sec('賞味期限タイプ',e)+sec('経過日数タイプ',c)+(items.length?'':`<p class="empty">条件に合うアイテムがありません。<br>右下の「追加」から登録しましょう。</p>`);
 }
 function render(){
 purgeTrash();save();
+const ctx=S.tab+'|'+view+'|'+hf;if(ctx!==lastCtx){selMode=false;sel.clear();lastCtx=ctx}
 const st=(sheet&&sheet===lastSheet)?($('.sheet')?.scrollTop||0):0;
 const home=S.tab==='home',exp=S.tab==='exp';
 if(hf&&hf!=='__all'&&!S.folders.includes(hf))hf=null;
@@ -233,28 +290,49 @@ if(home){
 }else{
  const all=S.items.filter(i=>i.t===S.tab&&fOK(i)&&locOK(i)),list=all.filter(inStock).sort(byDate),zl=all.filter(i=>!inStock(i));
  bar=`<div class="bar">${folderSel()}${locSel()}${manageBtn}</div>`;
- main=banner()+(all.length?list.map(cardHTML).join('')+(zl.length?`<h3 class="sec">在庫0<span>${zl.length}件</span></h3>`+zl.map(zeroCard).join(''):''):`<p class="empty">条件に合うアイテムがありません。<br>右下の「追加」から登録しましょう。</p>`);
+ main=banner()+(all.length?selRow()+list.map(cardHTML).join('')+(zl.length?`<h3 class="sec">在庫0<span>${zl.length}件</span></h3>`+zl.map(zeroCard).join(''):''):`<p class="empty">条件に合うアイテムがありません。<br>右下の「追加」から登録しましょう。</p>`);
 }
 $('#app').innerHTML=`
 <header><h1>ストック管理</h1><button class="flbtn" data-act="menu" aria-label="データの管理">${bloom('var(--red)','').replace('<svg','<svg class="bloom"')}</button></header>
 ${bar}
 <main>${main}</main>
-${home&&view==='trash'?'':`<button class="fab" data-act="add" aria-label="新規追加"><b>＋</b>追加</button>`}
+ ${selMode?`<div class="selbar"><button class="ghost" data-act="selend">やめる</button><button class="ghost" id="selall" data-act="selall">全選択</button><button class="primary" id="selgo" data-act="selshare" ${sel.size?'':'disabled'}>共有（<span id="selN">${sel.size}</span>）</button></div>`:''}
+${(home&&view==='trash')||selMode?'':`<button class="fab" data-act="add" aria-label="新規追加"><b>＋</b>追加</button>`}
 <nav role="tablist"><button role="tab" aria-selected="${home}" data-act="tab" data-t="home"><svg ${SVA}><path d="M4.5 14.5 16 4.5l11.5 10M8 12.5V25a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3V12.5M13 28v-7h6v7"/></svg>ホーム</button>
 <button role="tab" aria-selected="${exp}" data-act="tab" data-t="exp"><svg ${SVA}><rect x="4.5" y="7" width="23" height="20" rx="6"/><path d="M11 3.5v6M21 3.5v6M4.5 13.5h23"/><circle cx="16" cy="20.5" r="2.6" fill="currentColor" stroke="none"/></svg>賞味期限</button>
 <button role="tab" aria-selected="${S.tab==='cnt'}" data-act="tab" data-t="cnt"><svg ${SVA}><path d="M16 3.5v25M5.2 9.75l21.6 12.5M5.2 22.25l21.6-12.5M12.5 6.2L16 9.5l3.5-3.3M12.5 25.8l3.5-3.3 3.5 3.3"/></svg>経過日数</button></nav>
 ${sheet?renderSheet():''}`;
 const sh=$('.sheet');if(sh&&st)sh.scrollTop=st;lastSheet=sheet;
+vis=[...document.querySelectorAll('main .card[data-id]')].map(e=>+e.dataset.id);
+if(selMode){[...sel].forEach(id=>{if(!vis.includes(id))sel.delete(id)});updSel()}
 }
 
 function renderSheet(){
 const wrap=b=>`<div class="scrim" data-act="close"><div class="sheet${sheet===lastSheet?' still':''}" role="dialog" aria-modal="true">${b}</div></div>`;
 const head=(t)=>`<h2>${t}<button class="x" data-act="close" aria-label="閉じる">✕</button></h2>`;
 if(sheet.k==='news')return `<div class="scrim" data-act="closeNews" style="align-items:center;padding:24px"><div class="sheet" role="dialog" aria-modal="true" aria-labelledby="nt" style="border-radius:28px;text-align:center;padding-top:24px">
- ${bloom('var(--red)','width:64px;height:64px;display:block;margin:0 auto 8px')}<h2 id="nt" style="justify-content:center;margin-bottom:8px">在庫0の表示が変わりました</h2>
- <p style="line-height:1.9;color:var(--mute);font-size:14px;text-align:left">・在庫が0のアイテムも、通常の一覧に「在庫0」として表示されます<br>・新規登録でも、数量を0にして登録できます</p>
+ ${bloom('var(--red)','width:64px;height:64px;display:block;margin:0 auto 8px')}<h2 id="nt" style="justify-content:center;margin-bottom:8px">引き継ぎと共有ができました</h2>
+ <p style="line-height:1.9;color:var(--mute);font-size:14px;text-align:left">・右上のお花ボタンから、「引き継ぎコード」で別の端末にデータを移せます<br>・一覧の「まとめて選んで共有」で、複数のアイテムをテキストでLINEなどに送れます</p>
  <button class="primary" data-act="closeNews">OK</button></div></div>`;
-if(sheet.k==='menu')return wrap(head('データの管理')+`<p style="color:var(--mute);font-size:14px;line-height:1.7">実行すると、いまのデータは元に戻せません（ゴミ箱の中身も消えます）。</p><button class="ghost" data-act="sample">サンプルデータに戻す</button><button class="ghost" data-act="wipe">全データを消す</button>`);
+if(sheet.k==='menu')return wrap(head('データの管理')+`<label>別の端末へ引き継ぐ</label><button class="ghost" data-act="xout" style="margin-top:0">引き継ぎコードを作る</button><button class="ghost" data-act="xin">引き継ぎコードで復元する</button>
+ <label>初期化</label><p style="color:var(--mute);font-size:14px;line-height:1.7;margin:0">実行すると、いまのデータは元に戻せません（ゴミ箱の中身も消えます）。</p><button class="ghost" data-act="sample">サンプルデータに戻す</button><button class="ghost" data-act="wipe">全データを消す</button>`);
+if(sheet.k==='share')return wrap(head('テキストで共有')+`<p class="hint">内容は自由に書きかえてから送れます。</p><textarea id="st" data-act="stext" style="min-height:260px;line-height:1.7">${esc(sheet.text)}</textarea>
+ ${navigator.share?`<button class="primary" data-act="tshare">LINEなどで共有する</button><button class="ghost" data-act="tcopy">コピーする</button>`:`<button class="primary" data-act="tcopy">コピーする</button>`}`);
+if(sheet.k==='xout'){const mb=((S.items.reduce((a,i)=>a+(i.photo?i.photo.length:0),0)+S.trash.reduce((a,x)=>a+(x.item.photo?x.item.photo.length:0),0))/1048576);
+ return wrap(head('引き継ぎコードを作る')+`<p class="hint">このコードを新しい端末の「データの管理 → 引き継ぎコードで復元する」に貼り付けると、データを移せます。</p>
+ <label class="chkrow"><input type="checkbox" data-act="xphoto" ${sheet.photo?'checked':''}><span>写真も含める（写真の合計：約${mb.toFixed(1)}MB）</span></label>
+ ${sheet.photo&&mb>0.5?'<p class="hint" style="color:var(--red)">写真を含めるとコードがとても長くなります。LINEなどで送れないときは「ファイルで保存」を使ってください。</p>':''}
+ <label for="xc">引き継ぎコード${sheet.code?`（${sheet.code.length.toLocaleString()}文字）`:''}</label><textarea id="xc" readonly style="min-height:130px;font-size:12px;word-break:break-all">${sheet.code?esc(sheet.code):'作成中…'}</textarea>
+ <button class="primary" data-act="xcopy" ${sheet.code?'':'disabled'}>コードをコピーする</button>
+ ${navigator.share?`<button class="ghost" data-act="xshare" ${sheet.code?'':'disabled'}>LINEなどで送る</button>`:''}
+ <button class="ghost" data-act="xfile" ${sheet.code?'':'disabled'}>ファイルで保存する</button>`)}
+if(sheet.k==='xin'){const p=sheet.pending;
+ return wrap(head('引き継ぎコードで復元')+`<p class="hint">古い端末で作ったコードを貼り付けてください（ファイルからも読み込めます）。</p>
+ <textarea id="xt" data-act="xtext" placeholder="STOCK1:..." style="min-height:130px;font-size:12px;word-break:break-all">${esc(sheet.text||'')}</textarea>
+ <input type="file" id="xf" accept=".txt,text/plain" data-xfile="1" hidden><label for="xf" class="ghost" style="display:flex;align-items:center;justify-content:center;cursor:pointer">ファイルから読み込む</label>
+ <button class="primary" data-act="xcheck">内容を確認する</button>
+ ${p?`<div id="xsum" class="warnbox" style="margin-top:14px;color:var(--ink)">このコードの内容<br><span style="font-weight:500;line-height:1.8">アイテム ${p.items.length}件（在庫0：${p.items.filter(i=>!inStock(i)).length}件）／写真あり ${p.items.filter(i=>i.photo).length}件<br>フォルダ ${p.folders.length}／保管場所 ${p.locs.length}／ゴミ箱 ${p.trash.length}件</span>
+  <p style="color:var(--red);margin:8px 0 0">復元すると、この端末のいまのデータはすべてこの内容に置きかわります。</p><button class="primary" data-act="xapply">この内容で上書きして復元する</button></div>`:''}`)}
 if(sheet.k==='folder'){
  const kind=sheet.kind||'f',isF=kind==='f',arr=isF?S.folders:S.locs,key=isF?'f':'loc',nm=isF?'フォルダ':'保管場所';
  const cnt=n=>S.items.filter(i=>i[key]===n).length,one=isF&&arr.length<2;
@@ -321,6 +399,8 @@ function syncForm(){ // keep typed values before re-render
 const clone=o=>JSON.parse(JSON.stringify(o));
 app.addEventListener('change',e=>{
  const t=e.target;
+ if(t.dataset.xfile){const f=t.files&&t.files[0];t.value='';if(!f)return;f.text().then(tx=>{sheet.text=tx;sheet.pending=null;render()}).catch(()=>toast('ファイルを読み込めませんでした'));return}
+ if(t.dataset.act==='xphoto'&&sheet?.k==='xout'){sheet.photo=t.checked;sheet.code=null;render();genCode();return}
  if(t.dataset.photo){const file=t.files&&t.files[0];t.value='';if(!file)return;
   readPhoto(file).then(d=>{
    if(sheet?.k==='add'){syncForm();sheet.form.photo=d;render()}
@@ -343,7 +423,10 @@ app.addEventListener('change',e=>{
  if(t.dataset.act==='loc'){S.loc=t.value;render();return}
  if(sheet?.k==='add'&&(t.dataset.k==='f'||t.dataset.k==='u'||t.dataset.k==='loc')){syncForm();sheet.form[t.dataset.k]=t.value;render()}
 });
+function genCode(){const sh=sheet;makeCode(sh.photo).then(c=>{if(sheet===sh){sh.code=c;render()}}).catch(()=>toast('コードを作れませんでした'))}
 app.addEventListener('input',e=>{ const a=e.target.dataset.act;
+ if(a==='stext'&&sheet?.k==='share'){sheet.text=e.target.value;return}
+ if(a==='xtext'&&sheet?.k==='xin'){sheet.text=e.target.value;sheet.pending=null;$('#xsum')?.remove();return}
  if(a==='memo'&&sheet?.k==='detail'){sheet.draft.memo=e.target.value;updDirty()}
  else if(a==='name'&&sheet?.k==='detail'){sheet.draft.name=e.target.value;updDirty()} });
 app.addEventListener('focusin',e=>{ if(e.target.dataset.act==='rq')e.target.select() });
@@ -352,6 +435,26 @@ app.addEventListener('click',e=>{
  if(b.classList.contains('scrim')&&e.target!==b)return;
  const a=b.dataset.act;
  if(a==='tab'){if(S.tab==='home'&&b.dataset.t==='home')hf=null;S.tab=b.dataset.t;view=null;render()}
+ else if(a==='selmode'){selMode=true;sel.clear();render()}
+ else if(a==='selend'){selMode=false;sel.clear();render()}
+ else if(a==='tog'){const id=+b.dataset.id;sel.has(id)?sel.delete(id):sel.add(id);updSel()}
+ else if(a==='selall'){if(vis.every(id=>sel.has(id)))sel.clear();else vis.forEach(id=>sel.add(id));updSel()}
+ else if(a==='selshare'){if(!sel.size){toast('共有するアイテムを選んでください');return}sheet={k:'share',text:buildText(sel)};render()}
+ else if(a==='tcopy'){copyText(sheet.text).then(ok=>toast(ok?'コピーしました':'コピーできませんでした'))}
+ else if(a==='tshare'){navigator.share({text:sheet.text}).catch(()=>{})}
+ else if(a==='xout'){sheet={k:'xout',photo:false,code:null};render();genCode()}
+ else if(a==='xin'){sheet={k:'xin',text:'',pending:null};render()}
+ else if(a==='xcopy'){copyText(sheet.code).then(ok=>toast(ok?'コピーしました':'コピーできませんでした'))}
+ else if(a==='xshare'){navigator.share({text:sheet.code}).catch(()=>toast('共有できませんでした。「ファイルで保存」をお試しください'))}
+ else if(a==='xfile'){const d=new Date(),n='stock-backup-'+d.getFullYear()+String(d.getMonth()+1).padStart(2,'0')+String(d.getDate()).padStart(2,'0')+'.txt';
+  const u=URL.createObjectURL(new Blob([sheet.code],{type:'text/plain'})),a2=document.createElement('a');a2.href=u;a2.download=n;document.body.appendChild(a2);a2.click();a2.remove();setTimeout(()=>URL.revokeObjectURL(u),2000);toast('ファイルを保存しました')}
+ else if(a==='xcheck'){const sh=sheet;if(!(sh.text||'').trim()){toast('コードを貼り付けてください');return}
+  readCode(sh.text).then(p=>{if(sheet===sh){sh.pending=p;render()}}).catch(()=>toast('このコードは読み取れませんでした。コピーした内容を確認してください'))}
+ else if(a==='xapply'){if(!b.dataset.armed){b.dataset.armed=1;b.textContent='もう一度押すと、上書きして復元します';return}
+  const d=sheet.pending,old={folders:S.folders,locs:S.locs,units:S.units,items:S.items,nid:S.nid,trash:S.trash,folder:S.folder,loc:S.loc};
+  Object.assign(S,{folders:d.folders,locs:d.locs,units:d.units,items:d.items,nid:d.nid,trash:d.trash,folder:'all',loc:'all'});
+  if(!save()){Object.assign(S,old);toast('容量が足りず復元できませんでした');return}
+  hf=null;view=null;sheet=null;render();toast('復元しました')}
  else if(a==='hopen'){hf=b.dataset.f;render();$('main')?.scrollTo(0,0)}
  else if(a==='hroot'){hf=null;view=null;render()}
  else if(a==='vzero'){view='zero';render()}
@@ -370,7 +473,7 @@ app.addEventListener('click',e=>{
   if(!save()){S.items[idx]=old;toast('保存容量がいっぱいで更新できませんでした（写真を外すと保存できることがあります）');return}
   sheet=null;render();toast('「'+d.name+'」を更新しました')}
  else if(a==='rmPhoto'){if(sheet.k==='add'){syncForm();sheet.form.photo=null}else{sheet.draft.photo=null}render()}
- else if(a==='closeNews'){try{localStorage.setItem('stock-seen','v4-zero')}catch(e){}sheet=null;render()}
+ else if(a==='closeNews'){try{localStorage.setItem('stock-seen','v5-xfer')}catch(e){}sheet=null;render()}
  else if(a==='menu'){sheet={k:'menu'};render()}
  else if(a==='sample'||a==='wipe'){if(!b.dataset.armed){b.dataset.armed=1;b.textContent='もう一度押すと実行します';b.style.background='var(--blush)';return}
   Object.assign(S,mk(),a==='wipe'?{items:[]}:{});hf=null;view=null;sheet=null;render();toast(a==='wipe'?'全データを消しました':'サンプルデータに戻しました')}
@@ -429,7 +532,7 @@ app.addEventListener('click',e=>{
 });
 const hadData=(()=>{try{return localStorage.getItem(KEY)!==null}catch(e){return false}})();
 load();render();
-try{if(localStorage.getItem('stock-seen')!=='v4-zero'){if(hadData){sheet={k:'news'};render()}else localStorage.setItem('stock-seen','v4-zero')}}catch(e){}
+try{if(localStorage.getItem('stock-seen')!=='v5-xfer'){if(hadData){sheet={k:'news'};render()}else localStorage.setItem('stock-seen','v5-xfer')}}catch(e){}
 if('serviceWorker' in navigator){
  const hadCtrl=!!navigator.serviceWorker.controller;let reloaded=false;
  navigator.serviceWorker.addEventListener('controllerchange',()=>{if(!hadCtrl||reloaded)return;reloaded=true;location.reload()});
